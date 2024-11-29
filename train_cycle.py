@@ -410,13 +410,13 @@ def main(args):
         
     if args.arch == 'cnn':
         print('CNN')
-        model = CNN(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, projector_features=512, use_mlp=True).to(DEVICE)
-        teacher = CNN(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, projector_features=512, use_mlp=True).to(DEVICE)
+        model = CNN(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, project_features=512, use_mlp=True).to(DEVICE)
+        teacher = CNN(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, project_features=512, use_mlp=True).to(DEVICE)
         # class 에서 num_region을 받지 않도록하고, forward에서 받도록 수정.
     elif args.arch == 'hybrid':
         print('Hybrid')
-        model = Hybrid(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, projector_features=768, use_mlp=True).to(DEVICE)
-        teacher = Hybrid(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, projector_features=768, use_mlp=True).to(DEVICE)
+        model = Hybrid(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, project_features=768, use_mlp=True).to(DEVICE)
+        teacher = Hybrid(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, project_features=768, use_mlp=True).to(DEVICE)
     
     ###
     # 학습된 모델에서 백본 레이어 불러오기.
