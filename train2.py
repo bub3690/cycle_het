@@ -259,7 +259,6 @@ def load_pretrained_model_without_omni_heads(model, checkpoint_path):
 
 
 
-
 def main(args):
     if torch.cuda.is_available():
         DEVICE = torch.device('cuda')
@@ -489,7 +488,12 @@ def main(args):
     ###
     # 학습된 모델에서 백본 레이어 불러오기.
     if args.pretrained != None:
-        model = load_pretrained_model_without_omni_heads(model, args.pretrained)    
+        model = load_pretrained_model_without_omni_heads(model, args.pretrained)
+        
+    
+    
+    ###
+    
     
     
     if args.optimizer == 'SGD':        
@@ -622,11 +626,8 @@ def main(args):
                 plt.figure(figsize=(10,10))
                 sns.scatterplot(x='x', y='y', hue='label',style='position',data=df,palette='Set1')
                 plt.savefig(os.path.join(tsne_folder,f'{dataset_list[head_n]}_test_tsne.png'))            
-        wandb.log({
-            f"{dataset_list[head_n]} Test ACC": test_acc,
-            f"{dataset_list[head_n]} Test MAE": test_mae
-        })
-    
+            
+        
         
         if consensus_bool_list[head_n]:
 
@@ -649,7 +650,9 @@ def main(args):
                 print(f"Consensus Test ACC : {consensus_acc:.2f}, Consensus Test MAE : {consensus_mae:.2f}")      
                 
             wandb.log({
+                f"{dataset_list[head_n]} Test ACC": test_acc,
                 f"{dataset_list[head_n]} Consensus Test ACC": consensus_acc,
+                f"{dataset_list[head_n]} Test MAE": test_mae,
                 f"{dataset_list[head_n]} Consensus Test MAE": consensus_mae
             })
             
