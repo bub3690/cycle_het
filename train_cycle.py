@@ -541,12 +541,12 @@ def main(args):
             
             
             
-    torch.save(model.state_dict(), os.path.join(base_path,'checkpoint','{}_last_student.pth'.format(model_name)) )            
-    torch.save(teacher.state_dict(), os.path.join(base_path,'checkpoint','{}_last_teacher.pth'.format(model_name)) )        
+    torch.save(model.state_dict(), os.path.join(base_path,'checkpoint_cycle','{}_last_student.pth'.format(model_name)) )            
+    torch.save(teacher.state_dict(), os.path.join(base_path,'checkpoint_cycle','{}_last_teacher.pth'.format(model_name)) )        
             
     ### 학습 종료 후 ###
     # best model 불러오기.
-    model.load_state_dict( torch.load(os.path.join(base_path,'checkpoint','{}_last_student.pth'.format(model_name))) )
+    model.load_state_dict( torch.load(os.path.join(base_path,'checkpoint_cycle','{}_last_student.pth'.format(model_name))) )
     
     ###
     
