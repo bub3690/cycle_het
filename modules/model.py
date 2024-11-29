@@ -13,14 +13,14 @@ import torch.nn.functional as F
 
 
 class CNN(nn.Module):
-    def __init__(self,backbone,num_classes_list=[4],num_regions_list=[6]):
+    def __init__(self,backbone,num_classes_list=[4],num_regions_list=[6],  project_features=False,use_mlp=False):
         super(CNN, self).__init__()
         self.backbone, self.num_features = model_dict[backbone]
         
         # numclass 와 region을 list로 받아서 처리
         self.num_classes_list = num_classes_list
         self.num_regions_list = num_regions_list
-    
+
         # remove GAP, FC layer
         if backbone == 'densenet121':
             self.backbone = nn.Sequential(self.backbone())
@@ -30,6 +30,19 @@ class CNN(nn.Module):
             self.img_size = 16
         
         self.score_GAP = nn.AdaptiveAvgPool2d((1, 1))
+        
+        self.projector = None 
+        if project_features:
+            # supervised pretrain 방법
+            encoder_features = self.num_features
+            self.num_features = project_features
+            
+            if use_mlp:
+                self.projector = nn.Sequential(nn.Linear(encoder_features, self.num_features), nn.ReLU(inplace=True), nn.Linear(self.num_features, self.num_features))
+            else:
+                self.projector = nn.Linear(encoder_features, self.num_features)
+        
+        
         
         #multi-task heads
         #Partailly from ARK model
@@ -119,7 +132,12 @@ class CNN(nn.Module):
             pred_i = pred_i.view(-1,self.num_features)
             #print("gap : ",pred_i.shape)
             
+            if self.projector:
+                # 공통된 스페이스로 투영
+                pred_i = self.projector(pred_i)
+            
             if projection:
+                #projection 출력용 파라미터임.
                 projection_embeddings.append(pred_i)
             
             if embedding == False:
@@ -139,9 +157,12 @@ class CNN(nn.Module):
 
 
 class Hybrid(nn.Module):
-    def __init__(self,backbone,num_classes_list=[4],num_regions_list=[6]):
+    def __init__(self,backbone,num_classes_list=[4],num_regions_list=[6],project_features=False,use_mlp=False):
         super(Hybrid, self).__init__()
         self.backbone,num_features = model_dict[backbone]
+        
+        self.embed_dim = 768
+        self.num_features = 768         
         
         # numclass 와 region을 list로 받아서 처리
         self.num_classes_list = num_classes_list
@@ -157,17 +178,27 @@ class Hybrid(nn.Module):
         
         self.score_GAP = nn.AdaptiveAvgPool2d((1, 1))
         
+        self.projector = None 
+        if project_features:
+            # supervised pretrain 방법
+            encoder_features = self.num_features
+            self.num_features = project_features
+            if use_mlp:
+                self.projector = nn.Sequential(nn.Linear(encoder_features, self.num_features), nn.ReLU(inplace=True), nn.Linear(self.num_features, self.num_features))
+            else:
+                self.projector = nn.Linear(encoder_features, self.num_features)        
+        
         
         ###
         # https://github.com/FrancescoSaverioZuppichini/ViT
         # Transformer hybrid network
         
-        self.patch_emb = PatchEmbedding(in_channels=num_features, patch_size=1, emb_size=768, img_size=self.img_size)
+        self.patch_emb = PatchEmbedding(in_channels=num_features, patch_size=1, emb_size=self.embed_dim, img_size=self.img_size)
         
         # 2개의 transformer block
         self.transformer  = TransformerEncoderBlock()
         
-        self.num_features = 768     
+    
         #self.fc = nn.Linear(768, self.num_classes)
         
         #multi-task heads
@@ -271,6 +302,10 @@ class Hybrid(nn.Module):
             pred_i = self.score_GAP(pred_i)
             pred_i = pred_i.view(-1,768)
             #print("gap : ",pred_i.shape)
+            
+            if self.projector:
+                # 공통된 스페이스로 투영
+                pred_i = self.projector(pred_i)            
             
             if projection:
                 projection_embeddings.append(pred_i)

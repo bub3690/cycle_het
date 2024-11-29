@@ -270,7 +270,7 @@ def main(args):
     if args.linux:
         print('Using Linux')
         base_path = '/shared/home/mai/jongbub/ssl/cycle_het/'
-        data_path = '/shared/home/mai/jongbub/cycle_het/dataset/'
+        data_path = '/shared/home/mai/jongbub/ssl/cycle_het/dataset/'
     else:
         print('Using Windows')
         base_path = '/hdd/project/cycle_het/'
