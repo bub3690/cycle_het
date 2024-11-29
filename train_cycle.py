@@ -410,13 +410,13 @@ def main(args):
         
     if args.arch == 'cnn':
         print('CNN')
-        model = CNN(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list).to(DEVICE)
-        teacher = CNN(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list).to(DEVICE)
+        model = CNN(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, projector_features=512, use_mlp=True).to(DEVICE)
+        teacher = CNN(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, projector_features=512, use_mlp=True).to(DEVICE)
         # class 에서 num_region을 받지 않도록하고, forward에서 받도록 수정.
     elif args.arch == 'hybrid':
         print('Hybrid')
-        model = Hybrid(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list).to(DEVICE)
-        teacher = Hybrid(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list).to(DEVICE)
+        model = Hybrid(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, projector_features=768, use_mlp=True).to(DEVICE)
+        teacher = Hybrid(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list, projector_features=768, use_mlp=True).to(DEVICE)
     
     ###
     # 학습된 모델에서 백본 레이어 불러오기.
@@ -521,11 +521,11 @@ def main(args):
             all_valid_mae_list[head_n].append(valid_mae)
             
             
-            if valid_acc > best_valid_acc:
-                best_valid_acc = valid_acc
-                best_train_acc_with_val = train_acc
-                # save best
-                torch.save(model.state_dict(), os.path.join(base_path,'checkpoint','{}_best.pth'.format(model_name)) )            
+            # if valid_acc > best_valid_acc:
+            #     best_valid_acc = valid_acc
+            #     best_train_acc_with_val = train_acc
+            #     # save best
+            #     torch.save(model.state_dict(), os.path.join(base_path,'checkpoint','{}_best.pth'.format(model_name)) )            
             
             wandb.log({
                 f"{dataset_list[head_n]} Train Loss": train_loss,
@@ -541,12 +541,12 @@ def main(args):
             
             
             
+    torch.save(model.state_dict(), os.path.join(base_path,'checkpoint','{}_last_student.pth'.format(model_name)) )            
+    torch.save(teacher.state_dict(), os.path.join(base_path,'checkpoint','{}_last_teacher.pth'.format(model_name)) )        
             
-
-    
     ### 학습 종료 후 ###
     # best model 불러오기.
-    model.load_state_dict( torch.load(os.path.join(base_path,'checkpoint','{}_best.pth'.format(model_name))) )
+    model.load_state_dict( torch.load(os.path.join(base_path,'checkpoint','{}_last_student.pth'.format(model_name))) )
     
     ###
     
