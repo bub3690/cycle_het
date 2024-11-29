@@ -279,6 +279,7 @@ def main(args):
     if args.pretrained != None:
         pretrained = 'pretrained'
     
+    print(args.pretrained)
     
     model_name = 'single_{}_{}_{}_{}_{}_{}_ep{}'.format(args.arch, args.backbone, args.optimizer, args.loss,args.dataset[0],pretrained, args.epochs)    
     
@@ -489,7 +490,8 @@ def main(args):
     # 학습된 모델에서 백본 레이어 불러오기.
     if args.pretrained != None:
         model = load_pretrained_model_without_omni_heads(model, args.pretrained)
-        
+    
+    
     
     
     ###
@@ -689,7 +691,7 @@ if __name__ == '__main__':
     )
     
     # pretrained model checkpoint
-    parser.add_argument('--pretrained', default='None', type=str, help='pretrained model checkpoint')
+    parser.add_argument('--pretrained', default=None, type=str, help='pretrained model checkpoint')
     
     ###
     

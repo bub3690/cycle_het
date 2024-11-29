@@ -686,7 +686,7 @@ if __name__ == '__main__':
     )
     
     # pretrained model checkpoint
-    parser.add_argument('--pretrained', default='None', type=str, help='pretrained model checkpoint')
+    parser.add_argument('--pretrained', default=None, type=str, help='pretrained model checkpoint')
     
     ###
     
