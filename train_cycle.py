@@ -211,12 +211,12 @@ def main(args):
         pretrained = 'pretrained'
     
     
-    model_name = 'Cycle_{}_{}_{}_{}_{}_ep{}'.format(args.arch, args.backbone, args.optimizer, args.loss,pretrained, args.epochs)    
+    model_name = 'Cycle_{}_{}_{}_{}_{}_ep{}'.format(args.arch, args.backbone, args.optimizer, args.loss,pretrained, args.pretrain_epochs)    
     
     
     
     wandb.login(key='9b0830eae021991e53eaabb9bb697d9efef8fd58') # 본인 키 삽입.
-    wandb.init(project="cycle")
+    wandb.init(project="cycle_het")
     wandb.config.update(args)
     experiment_name = model_name # check point의 이름이 될 것.
     wandb.run.name = experiment_name

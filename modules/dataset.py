@@ -139,10 +139,15 @@ class SeverityDataset_cycle(Dataset):
                 [
                 # Chexpert에서 사용한 augmentation
                 
+                # UpSCALE, DownSCALE 224x224 -> 512x512
+                transforms.RandomApply([
+                    transforms.Resize((224,224)),
+                    transforms.Resize((512,512))], p=0.3),
+                
+                
                 #transforms.ToPILImage(),
                 #transforms.RandomHorizontalFlip(), # 일단 빼고, 나중에 레이블 반영해서 추가하기.
                 # distortion
-
                 transforms.RandomApply([transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.5)], p=0.8),
                 # random sharpness
                 transforms.RandomAdjustSharpness(sharpness_factor=0.0,p=0.8),
