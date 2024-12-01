@@ -12,6 +12,19 @@ import torch.nn.functional as F
 
 
 
+def froze_for_linear_eval(model):
+    # Freeze all parameters in the model
+    for param in model.parameters():
+        param.requires_grad = False
+    
+    # Unfreeze omni_heads parameters
+    for head in model.omni_heads:
+        for param in head.parameters():
+            param.requires_grad = True
+    
+    return model
+
+
 class CNN(nn.Module):
     def __init__(self,backbone,num_classes_list=[4],num_regions_list=[6],  project_features=False,use_mlp=False):
         super(CNN, self).__init__()

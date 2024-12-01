@@ -46,7 +46,7 @@ import wandb
 import time
 
 ### modules
-from modules.model import CNN, Hybrid
+from modules.model import CNN, Hybrid, froze_for_linear_eval
 
 #from modules.model import CNN, Hybrid
 from modules.dataset import SeverityDataset
@@ -491,6 +491,11 @@ def main(args):
     if args.pretrained != None:
         model = load_pretrained_model_without_omni_heads(model, args.pretrained)    
     
+    # linear evaluation
+    if args.linear_eval:
+        model = froze_for_linear_eval(model)
+    
+    
     
     if args.optimizer == 'SGD':        
         optimizer = torch.optim.SGD(model.parameters(), lr,
@@ -689,6 +694,8 @@ if __name__ == '__main__':
     parser.add_argument('--pretrained', default=None, type=str, help='pretrained model checkpoint')
     
     ###
+    
+    parser.add_argument('--linear_eval', action='store_true')
     
     parser.add_argument('--batch_size', default=64, type=int, help='batch size')
     parser.add_argument('--epochs', default=100, type=int, help='number of total epochs to run')
