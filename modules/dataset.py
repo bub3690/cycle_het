@@ -111,7 +111,10 @@ class SeverityDataset(Dataset):
             
         
         return image, now_label, now_label_float, filename, idx
-    
+
+
+
+
     
 class SeverityDataset_cycle(Dataset):
     def __init__(self, filename_list, label_list, label_df, prefix, global_regression=False,transform=None,augmentation=None,train=True):

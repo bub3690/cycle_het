@@ -5,6 +5,26 @@ from einops import rearrange, reduce, repeat
 from einops.layers.torch import Rearrange, Reduce
 
 
+
+class PositionalEmbedding(nn.Module):
+    def __init__(self, seq_len: int, emb_size: int):
+        """
+        Args:
+            seq_len: Number of patches or sequence length (e.g., 1024 for 16x16 grid).
+            emb_size: Embedding dimension of each patch (e.g., 768).
+        """
+        super(PositionalEmbedding, self).__init__()
+        self.positions = nn.Parameter(torch.randn(seq_len, emb_size))  # Learnable positional embeddings
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor of shape (batch_size, seq_len, emb_size)
+        Returns:
+            Tensor with positional embeddings added.
+        """
+        return x + self.positions  # Add positional embeddings
+
 class PatchEmbedding(nn.Module):
     def __init__(self, in_channels: int = 3, patch_size: int = 16, emb_size: int = 768, img_size: int = 224):
         self.patch_size = patch_size

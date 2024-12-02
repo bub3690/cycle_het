@@ -46,7 +46,7 @@ import wandb
 import time
 
 ### modules
-from modules.model import CNN, Hybrid,MultiRegionHybridDecoderWithPosition, froze_for_linear_eval
+from modules.model import CNN, Hybrid,MultiRegionHybridDecoderWithPosition,MultiRegionDecoderWithPositionEncoding2,MultiRegionDecoderWithFPN, froze_for_linear_eval
 
 #from modules.model import CNN, Hybrid
 from modules.dataset import SeverityDataset
@@ -62,10 +62,95 @@ from modules.dataset import SeverityDataset
 
 # dataset
 
+class GeneralizedCrossEntropyLoss(nn.Module):
+    def __init__(self, q=0.7, reduction='mean'):
+        """
+        Generalized Cross Entropy Loss
+        Args:
+            q (float): Robustness hyperparameter (0 < q <= 1). 
+                       Lower values make it more robust to noise.
+            reduction (str): Specifies the reduction to apply to the output.
+                             'mean' | 'sum' | 'none'
+        """
+        super(GeneralizedCrossEntropyLoss, self).__init__()
+        assert 0 < q <= 1, "q must be in (0, 1]"
+        self.q = q
+        self.reduction = reduction
+
+    def forward(self, logits, targets):
+        """
+        Args:
+            logits: Model predictions (logits), shape (batch_size, num_classes)
+            targets: Ground truth labels, shape (batch_size,)
+        Returns:
+            Loss value
+        """
+        # Compute probabilities
+        probs = torch.softmax(logits, dim=1)  # Shape: (batch_size, num_classes)
+        
+        # Gather the probabilities corresponding to the true labels
+        probs_y = probs[torch.arange(logits.size(0)), targets]  # Shape: (batch_size,)
+        
+        # GCE loss computation
+        gce_loss = (1 - probs_y**self.q) / self.q
+
+        # Apply reduction
+        if self.reduction == 'mean':
+            return gce_loss.mean()
+        elif self.reduction == 'sum':
+            return gce_loss.sum()
+        else:  # 'none'
+            return gce_loss
+
+def get_box_centers(num_regions):
+    """
+    Calculate the center points of the given boxes.
+    Args:
+        boxes: List of tensors, each tensor representing a box [x_min, y_min, x_max, y_max].
+    Returns:
+        Tensor: Centers of the boxes (num_boxes, 2), where each row is [center_x, center_y].
+    """
+    
+    if num_regions == 6:
+        boxes = [torch.tensor([0, 0, 0.4, 0.5]), # A (1)
+                torch.tensor([0.3, 0, 0.7, 0.5]), # B (2)
+                torch.tensor([0.6, 0, 1, 0.5]), # C (3)
+                torch.tensor([0, 0.5, 0.4, 1]), # D (4)
+                torch.tensor([0.3, 0.5, 0.7, 1]), # E (5)
+                torch.tensor([0.6, 0.5, 1, 1]) # F (6)
+                ]
+    elif num_regions == 4:
+        boxes = [   torch.tensor([0, 0, 0.5, 0.5]), # A (1)
+                    torch.tensor([0.5, 0, 1, 0.5]), # B (2)
+                    torch.tensor([0, 0.5, 0.5, 1]), # C (3)
+                    torch.tensor([0.5, 0.5, 1, 1]) # D (4)
+                ]
+    elif num_regions == 2:
+        #좌우 2개의 박스.
+        boxes = [   torch.tensor([0, 0, 1.0, 0.5]), # A (1)
+                    torch.tensor([0, 0.5, 1.0, 1.0]) # B (2)
+                ]
+    elif num_regions == 1:
+        #전체
+        boxes = [   torch.tensor([0, 0, 1.0, 1.0]) # A (1)
+                ]    
+    
+    centers = []
+    
+    for box in boxes:
+        x_min, y_min, x_max, y_max = box
+        center_x = (x_min + x_max) / 2
+        center_y = (y_min + y_max) / 2
+        centers.append([center_x, center_y])
+
+    return torch.tensor(centers)
 
 
 
-def train(args, model, num_classes, num_regions, head_n, EPOCHS, epoch, train_dataloader, optimizer, classify_criterion, DEVICE):
+
+
+
+def train(args, model, num_classes, num_regions, head_n, EPOCHS, epoch, train_dataloader, optimizer, classify_criterion,scheduler, DEVICE):
     #여기에 num_classes_list, num_regions_list, n_head도
     model.train()
     
@@ -75,10 +160,18 @@ def train(args, model, num_classes, num_regions, head_n, EPOCHS, epoch, train_da
     
     total_train_loss = 0
     
+
     for idx, (img, label,label_float, filename,file_index) in enumerate(train_dataloader):
         img, label,label_float = img.to(DEVICE), label.to(DEVICE), label_float.to(DEVICE)
         optimizer.zero_grad()
-        pred = model(img, head_n= head_n)
+        
+        positions = get_box_centers(num_regions)
+        positions = positions.to(DEVICE)
+        # gaussian noise 추가
+        positions = positions + torch.randn(positions.size()).to(DEVICE) * 0.01
+        
+        positions = positions.repeat(img.shape[0],1,1)
+        pred,features = model(img, positions)
         # 출력값 : [batch_size, 6, 4] . 6개의 value를 가진 4개의 class
         
         #loss for classification per 6 position
@@ -87,8 +180,11 @@ def train(args, model, num_classes, num_regions, head_n, EPOCHS, epoch, train_da
         for i in range(num_regions):
             pos_probs = pred
             pos_probs = pos_probs[:,i,:]
+            #softmax
+            pos_probs = F.softmax(pos_probs, dim=1)
             #print(pos_probs[0].argmax(), label[0,i])
-            
+            #print(pos_probs.max(1,keepdim=True)[0])
+                        
             loss_classifier = classify_criterion(pos_probs, label[:,i])
                 
             loss_classification += loss_classifier
@@ -99,6 +195,9 @@ def train(args, model, num_classes, num_regions, head_n, EPOCHS, epoch, train_da
             train_mae[i] += torch.abs(prediction - label[:,i].view_as(prediction)).sum().item()
         
         loss_classification = loss_classification / 6
+        bs = features.size(0)
+        # feature : [bs, 6,embedding_dim], label : [bs, 6]
+        #print('shape:',features.shape, label.shape)
         
         #loss for regression per 6 position
         # for i in range(6):
@@ -108,11 +207,11 @@ def train(args, model, num_classes, num_regions, head_n, EPOCHS, epoch, train_da
         # loss_regression = loss_regression / 6
         
         #loss = alpha * loss_classification + (1-alpha) * loss_regression
-        loss = loss_classification
+        loss = loss_classification 
         
         loss.backward()
         optimizer.step()
-        
+        scheduler.step()
         
         total_train_loss += loss.item()
     
@@ -151,7 +250,10 @@ def evaluate(args, model, num_classes, num_regions, head_n, EPOCHS, epoch, valid
     with torch.no_grad():
         for idx, (img, label,label_float, filename,file_index) in enumerate(valid_dataloader):
             img, label,label_float = img.to(DEVICE), label.to(DEVICE), label_float.to(DEVICE)
-            pred = model(img, head_n=head_n)
+            positions = get_box_centers(num_regions)
+            positions = positions.to(DEVICE)
+            positions = positions.repeat(img.shape[0],1,1)
+            pred,features = model(img, positions)
             # 출력값 : [batch_size, 6, 4] . 6개의 value를 가진 4개의 class
             
             #loss for classification per 6 position
@@ -220,7 +322,10 @@ def plot_tsne(args, model, num_classes, num_regions, head_n, valid_dataloader, D
         with torch.no_grad():
             for idx, (img, label,label_float, filename,file_index) in enumerate(valid_dataloader):
                 img, label, label_float = img.to(DEVICE), label.to(DEVICE),label_float.to(DEVICE)
-                pred = model(img, head_n=head_n,embedding=True)
+                positions = get_box_centers(num_regions)
+                positions = positions.to(DEVICE)
+                positions = positions.repeat(img.shape[0],1,1)
+                pred = model(img, positions,embedding=True)
                 for i in range(num_regions):
                     pos_probs = pred[:,i,:]
                     embedding_list += pos_probs.cpu().numpy().tolist()
@@ -249,7 +354,7 @@ def load_pretrained_model_without_omni_heads(model, checkpoint_path):
     
     # omni_heads 제외
     filtered_dict = {
-        k: v for k, v in checkpoint.items() if not (k.startswith('fc') or k.startswith('omni_heads'))
+        k: v for k, v in checkpoint.items() if not (k.startswith('classifier') or k.startswith('fc') or k.startswith('omni_heads'))
     }
     # 불러온 파라미터를 현재 모델 state_dict에 적용
     model_dict.update(filtered_dict)
@@ -259,6 +364,36 @@ def load_pretrained_model_without_omni_heads(model, checkpoint_path):
     print("Loaded pretrained model without omni_heads.")
     
     return model
+
+
+from torch.optim.lr_scheduler import LambdaLR
+
+import numpy as np
+import torch
+from torch.optim.lr_scheduler import LambdaLR
+
+def get_warmup_scheduler(optimizer, warmup_steps, total_steps):
+    """
+    Returns a scheduler with a linear warmup phase and a cosine decay phase.
+
+    Args:
+        optimizer: Optimizer for the model.
+        warmup_steps: Number of warmup steps.
+        total_steps: Total number of steps in the training process.
+
+    Returns:
+        LambdaLR scheduler
+    """
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            # Linear warm-up
+            return float(current_step) / float(max(1, warmup_steps))
+        else:
+            # Cosine decay using NumPy
+            progress = (current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
+
+    return LambdaLR(optimizer, lr_lambda)
 
 
 
@@ -490,7 +625,10 @@ def main(args):
         model = Hybrid(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list).to(DEVICE)
     elif args.arch == 'hybrid_decoder':
         print('Hybrid Decoder')
-        model = MultiRegionHybridDecoderWithPosition(backbone=args.backbone, num_classes_list = num_classes_list, num_regions_list=num_regions_list).to(DEVICE)
+        model = MultiRegionDecoderWithPositionEncoding2(backbone=args.backbone, num_classes = num_classes_list[0]).to(DEVICE)
+    elif args.arch == 'multi_region_hybrid_fpn':
+        print('Multi Region Hybrid FPN')
+        model = MultiRegionDecoderWithFPN(backbone=args.backbone, num_classes = num_classes_list[0]).to(DEVICE)
     
     ###
     # 학습된 모델에서 백본 레이어 불러오기.
@@ -517,7 +655,12 @@ def main(args):
                                     weight_decay=args.weight_decay)    
     
     classify_criterion = nn.CrossEntropyLoss()
+    #classify_criterion = GeneralizedCrossEntropyLoss(q=0.7)
     
+    # Scheduler 생성
+    warmup_steps = 500  # Warm-up 단계 (예: 500 스텝)
+    total_steps = len(train_data_loader_list[0]) * EPOCHS  # 전체 스텝 수
+    scheduler = get_warmup_scheduler(optimizer, warmup_steps, total_steps)    
     
     # trainer
     
@@ -551,7 +694,8 @@ def main(args):
             train_loss, train_acc, train_mae = train(args, model, num_classes_list[head_n], num_regions_list[head_n], head_n,
                                                      EPOCHS, epoch, 
                                                      train_data_loader_list[head_n],
-                                                     optimizer, classify_criterion, DEVICE)
+                                                     optimizer, classify_criterion,
+                                                     scheduler,DEVICE)
             
             all_train_loss_list[head_n].append(train_loss)
             all_train_acc_list[head_n].append(train_acc)
@@ -572,6 +716,7 @@ def main(args):
             
             
             if valid_acc > best_valid_acc:
+                best_epoch = epoch
                 best_valid_acc = valid_acc
                 best_train_acc_with_val = train_acc
                 # save best
@@ -588,7 +733,7 @@ def main(args):
             
             
 
-    
+    print(f"Best Epoch : {best_epoch}", f"Best Valid ACC : {best_valid_acc:.2f}, Best Train ACC with Valid : {best_train_acc_with_val:.2f}")
     ### 학습 종료 후 ###
     # best model 불러오기.
     model.load_state_dict( torch.load(os.path.join(base_path,'checkpoint','{}_best.pth'.format(model_name))) )
@@ -607,7 +752,10 @@ def main(args):
         with torch.no_grad():
             for idx, (img, label,label_float, filename, file_index) in enumerate(test_data_loader_list[head_n]):
                 img, label,label_float = img.to(DEVICE), label.to(DEVICE),label_float.to(DEVICE)
-                pred = model(img, head_n)
+                positions = get_box_centers(num_regions)
+                positions = positions.to(DEVICE)
+                positions = positions.repeat(img.shape[0],1,1)
+                pred,features = model(img, positions)
                 for i in range( num_regions_list[head_n] ):
                     pos_probs = pred
                     pos_probs = pos_probs[:,i,:]
@@ -635,7 +783,9 @@ def main(args):
                 plt.savefig(os.path.join(tsne_folder,f'{dataset_list[head_n]}_test_tsne.png'))            
         wandb.log({
             f"{dataset_list[head_n]} Test ACC": test_acc,
-            f"{dataset_list[head_n]} Test MAE": test_mae
+            f"{dataset_list[head_n]} Test MAE": test_mae,
+            f"{dataset_list[head_n]} Best Valid ACC": best_valid_acc,
+            f"{dataset_list[head_n]} Best Train ACC with Valid": best_train_acc_with_val,
         })
     
         
@@ -646,7 +796,10 @@ def main(args):
             with torch.no_grad():
                 for idx, (img, label,label_float, filename, file_index) in enumerate(consensus_data_loader_list[head_n]):
                     img, label,label_float = img.to(DEVICE), label.to(DEVICE),label_float.to(DEVICE)
-                    pred = model(img, head_n)
+                    positions = get_box_centers(num_regions)
+                    positions = positions.to(DEVICE)
+                    positions = positions.repeat(img.shape[0],1,1)
+                    pred,features = model(img, positions)
                     for i in range( num_regions_list[head_n]):
                         pos_probs = pred
                         pos_probs = pos_probs[:,i,:]

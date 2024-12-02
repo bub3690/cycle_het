@@ -63,6 +63,229 @@ from modules.dataset import SeverityDataset
 # dataset
 
 
+from sklearn.mixture import GaussianMixture
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from sklearn.mixture import GaussianMixture
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from sklearn.mixture import GaussianMixture
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+def train_ulc(args, model, num_classes, num_regions, head_n, EPOCHS, epoch, train_dataloader, optimizer, classify_criterion, DEVICE):
+    """
+    Train the model using ULC with uncertainty-aware label correction.
+    """
+    model.train()
+    train_correct = [0] * num_regions
+    train_mae = [0] * num_regions
+    total_train_loss = 0
+
+    # Step 1: Compute losses for all samples
+    sample_losses = []  # Store per-sample loss
+    sample_indices = []  # Store sample indices
+    predictions = []  # Store model predictions
+    all_labels = []  # Store ground-truth labels for pseudo-label update
+
+    for idx, (img, label, label_float, filename, file_index) in enumerate(train_dataloader):
+        img, label = img.to(DEVICE), label.to(DEVICE)
+        optimizer.zero_grad()
+        pred = model(img, head_n=head_n)
+        loss_classifier = 0 
+        # Compute per-sample loss for classification
+        batch_losses = torch.zeros(img.size(0))  # Per-sample loss
+        for i in range(num_regions):
+            pos_probs = pred[:, i, :]
+            loss_classifier += classify_criterion(pos_probs, label[:, i])
+            batch_losses += F.cross_entropy(pos_probs, label[:, i], reduction='none').cpu()
+
+            # Accuracy and MAE calculation
+            prediction = pos_probs.max(1, keepdim=True)[1]
+            train_correct[i] += prediction.eq(label[:, i].view_as(prediction)).sum().item()
+            train_mae[i] += torch.abs(prediction - label[:, i].view_as(prediction)).sum().item()
+
+        # Store losses, indices, and predictions
+        sample_losses.extend(batch_losses.detach().numpy())
+        sample_indices.extend(file_index.cpu().numpy())
+        predictions.append(pred.detach().cpu())
+        all_labels.append(label.cpu())
+
+        # Optimize the model
+        loss = loss_classifier / num_regions
+        loss.backward()
+        optimizer.step()
+        total_train_loss += loss.item()
+
+    total_train_loss /= len(train_dataloader)
+
+    # Step 2: Apply GMM to classify clean and noisy samples
+    sample_losses = np.array(sample_losses).reshape(-1, 1)
+    gmm = GaussianMixture(n_components=2, random_state=0).fit(sample_losses)
+    clean_mask = gmm.predict_proba(sample_losses)[:, gmm.means_.argmin()] > 0.5
+
+    # Step 3: Reorder pseudo-labels and labels
+    all_indices = np.array(sample_indices)
+    sorted_indices = np.argsort(sample_indices)  # Sort indices based on dataset order
+    sorted_clean_mask = clean_mask[np.argsort(sorted_indices)]  # Reorder clean_mask to match dataset order
+
+    pseudo_labels = torch.cat([pred.argmax(dim=-1) for pred in predictions])[sorted_indices]
+    all_labels = torch.cat(all_labels)[sorted_indices]
+
+    # Separate clean and noisy indices
+    clean_indices = all_indices[sorted_clean_mask]
+    noisy_indices = all_indices[~sorted_clean_mask]
+
+    # Create new DataLoaders for clean and noisy data
+    clean_data = torch.utils.data.Subset(train_dataloader.dataset, clean_indices.tolist())
+    noisy_data = torch.utils.data.Subset(train_dataloader.dataset, noisy_indices.tolist())
+    clean_loader = torch.utils.data.DataLoader(clean_data, batch_size=train_dataloader.batch_size, shuffle=True)
+    noisy_loader = torch.utils.data.DataLoader(noisy_data, batch_size=train_dataloader.batch_size, shuffle=True)
+    
+    print(f"Clean samples: {len(clean_indices)}, Noisy samples: {len(noisy_indices)}")
+    # Step 4: Re-train using corrected labels
+    for clean_batch, noisy_batch in zip(clean_loader, noisy_loader):
+        # Process clean data
+        clean_img, clean_label, *_ = clean_batch
+        clean_img, clean_label = clean_img.to(DEVICE), clean_label.to(DEVICE)
+        optimizer.zero_grad()
+        clean_pred = model(clean_img, head_n=head_n)
+        clean_loss = sum(classify_criterion(clean_pred[:, i, :], clean_label[:, i]) for i in range(num_regions)) / num_regions
+        
+        # Process noisy data with pseudo-labels
+        noisy_img, noisy_label, _,_, now_noisy_idx = noisy_batch
+        noisy_img, noisy_label = noisy_img.to(DEVICE), noisy_label.to(DEVICE)
+        pseudo_label = pseudo_labels[now_noisy_idx].to(DEVICE)
+        noisy_pred = model(noisy_img, head_n=head_n)
+        #import pdb; pdb.set_trace()
+        noisy_loss = sum(classify_criterion(noisy_pred[:, i, :], pseudo_label[:, i]) for i in range(num_regions)) / num_regions
+
+        # Combine losses and update
+        total_loss = clean_loss + noisy_loss
+        total_loss.backward()
+        optimizer.step()
+
+    # Step 5: Calculate accuracy and MAE
+    train_acc_list = [100. * correct / len(train_dataloader.dataset) for correct in train_correct]
+    train_mae_list = [mae / len(train_dataloader.dataset) for mae in train_mae]
+
+    print(f"EPOCH {epoch} / {EPOCHS}, Mean Train ACC: {np.mean(train_acc_list):.2f}")
+    print(f"EPOCH {epoch} / {EPOCHS}, Mean Train MAE: {np.mean(train_mae_list):.2f}")
+    print(f"EPOCH {epoch} / {EPOCHS}, Loss: {total_train_loss:.2f}")
+
+    return total_train_loss, np.mean(train_acc_list), np.mean(train_mae_list)
+
+
+def train_codivide_mixmatch(args, model1, model2, num_classes, num_regions, head_n, EPOCHS, epoch, 
+                                     labeled_loader, unlabeled_loader, optimizer1, optimizer2, classify_criterion, DEVICE):
+    """
+    Train the model using ULC with Co-divide and MixMatch.
+    """
+    model1.train()
+    model2.eval()  # Fix one network and train the other
+
+    unlabeled_iter = iter(unlabeled_loader)
+    total_train_loss = 0
+    train_correct = [0] * num_regions
+    train_mae = [0] * num_regions
+
+    for batch_idx, (inputs_x, inputs_x2, labels_x, w_x) in enumerate(labeled_loader):
+        try:
+            inputs_u, inputs_u2 = unlabeled_iter.next()
+        except StopIteration:
+            unlabeled_iter = iter(unlabeled_loader)
+            inputs_u, inputs_u2 = unlabeled_iter.next()
+
+        # Prepare labeled inputs
+        batch_size = inputs_x.size(0)
+        labels_x = torch.zeros(batch_size, num_classes).scatter_(1, labels_x.view(-1, 1), 1).to(DEVICE)
+        w_x = w_x.view(-1, 1).to(DEVICE)
+        inputs_x, inputs_x2 = inputs_x.to(DEVICE), inputs_x2.to(DEVICE)
+
+        # Prepare unlabeled inputs
+        inputs_u, inputs_u2 = inputs_u.to(DEVICE), inputs_u2.to(DEVICE)
+
+        # Co-divide: label co-guessing of unlabeled samples
+        with torch.no_grad():
+            # Predictions from both networks
+            outputs_u11 = model1(inputs_u)
+            outputs_u12 = model1(inputs_u2)
+            outputs_u21 = model2(inputs_u)
+            outputs_u22 = model2(inputs_u2)
+
+            # Combine predictions and apply sharpening
+            pu = (torch.softmax(outputs_u11, dim=1) + torch.softmax(outputs_u12, dim=1) +
+                  torch.softmax(outputs_u21, dim=1) + torch.softmax(outputs_u22, dim=1)) / 4
+            ptu = pu ** (1 / args.T)
+            targets_u = ptu / ptu.sum(dim=1, keepdim=True)
+
+            # Label refinement for labeled samples
+            outputs_x = model1(inputs_x)
+            outputs_x2 = model1(inputs_x2)
+
+            px = (torch.softmax(outputs_x, dim=1) + torch.softmax(outputs_x2, dim=1)) / 2
+            px = w_x * labels_x + (1 - w_x) * px
+            ptx = px ** (1 / args.T)
+            targets_x = ptx / ptx.sum(dim=1, keepdim=True)
+
+        # MixMatch: MixUp augmentation
+        l = np.random.beta(args.alpha, args.alpha)
+        l = max(l, 1 - l)
+
+        all_inputs = torch.cat([inputs_x, inputs_x2, inputs_u, inputs_u2], dim=0)
+        all_targets = torch.cat([targets_x, targets_x, targets_u, targets_u], dim=0)
+
+        idx = torch.randperm(all_inputs.size(0))
+        input_a, input_b = all_inputs, all_inputs[idx]
+        target_a, target_b = all_targets, all_targets[idx]
+
+        mixed_input = l * input_a + (1 - l) * input_b
+        mixed_target = l * target_a + (1 - l) * target_b
+
+        # Forward pass
+        logits = model1(mixed_input[:batch_size * 2])
+        labeled_loss = -torch.mean(torch.sum(F.log_softmax(logits, dim=1) * mixed_target[:batch_size * 2], dim=1))
+
+        # Regularization
+        prior = torch.ones(num_classes) / num_classes
+        prior = prior.to(DEVICE)
+        pred_mean = torch.softmax(logits, dim=1).mean(0)
+        reg_penalty = torch.sum(prior * torch.log(prior / pred_mean))
+
+        loss = labeled_loss + reg_penalty
+
+        # Backpropagation and optimization
+        optimizer1.zero_grad()
+        loss.backward()
+        optimizer1.step()
+
+        total_train_loss += loss.item()
+
+        # Update metrics
+        for i in range(num_regions):
+            prediction = logits.max(1, keepdim=True)[1]
+            train_correct[i] += prediction.eq(labels_x[:, i].view_as(prediction)).sum().item()
+            train_mae[i] += torch.abs(prediction - labels_x[:, i].view_as(prediction)).sum().item()
+
+        print(f'\rEpoch [{epoch}/{EPOCHS}] Iter[{batch_idx + 1}/{len(labeled_loader)}] '
+              f'Labeled Loss: {labeled_loss.item():.4f}', end='')
+
+    # Calculate mean accuracy and MAE
+    train_acc_list = [100. * correct / len(labeled_loader.dataset) for correct in train_correct]
+    train_mae_list = [mae / len(labeled_loader.dataset) for mae in train_mae]
+
+    print(f'\nEpoch {epoch}/{EPOCHS}, Mean Train ACC: {np.mean(train_acc_list):.2f}')
+    print(f'Mean Train MAE: {np.mean(train_mae_list):.2f}, Total Loss: {total_train_loss:.4f}')
+
+    return total_train_loss, np.mean(train_acc_list), np.mean(train_mae_list)
+
+
+
 
 
 def train(args, model, num_classes, num_regions, head_n, EPOCHS, epoch, train_dataloader, optimizer, classify_criterion, DEVICE):
@@ -284,7 +507,7 @@ def main(args):
         pretrained = 'pretrained'
     
     
-    model_name = 'single_{}_{}_{}_{}_{}_{}_ep{}'.format(args.arch, args.backbone, args.optimizer, args.loss,args.dataset[0],pretrained, args.epochs)    
+    model_name = 'Noisy_co_{}_{}_{}_{}_{}_{}_ep{}'.format(args.arch, args.backbone, args.optimizer, args.loss,args.dataset[0],pretrained, args.epochs)    
     
     
     
@@ -548,7 +771,7 @@ def main(args):
         for head_n in range( len(num_regions_list) ):
             print("=====================================")            
             print(f"Head {dataset_list[head_n]} Training")
-            train_loss, train_acc, train_mae = train(args, model, num_classes_list[head_n], num_regions_list[head_n], head_n,
+            train_loss, train_acc, train_mae = train_ulc(args, model, num_classes_list[head_n], num_regions_list[head_n], head_n,
                                                      EPOCHS, epoch, 
                                                      train_data_loader_list[head_n],
                                                      optimizer, classify_criterion, DEVICE)
@@ -572,10 +795,11 @@ def main(args):
             
             
             if valid_acc > best_valid_acc:
+                best_epoch = epoch
                 best_valid_acc = valid_acc
                 best_train_acc_with_val = train_acc
                 # save best
-                torch.save(model.state_dict(), os.path.join(base_path,'checkpoint','{}_best.pth'.format(model_name)) )            
+                torch.save(model.state_dict(), os.path.join(base_path,'checkpoint_noisy','{}_best.pth'.format(model_name)) )            
             
             wandb.log({
                 f"{dataset_list[head_n]} Train Loss": train_loss,
@@ -588,7 +812,7 @@ def main(args):
             
             
 
-    
+    print(f"Best Epoch : {best_epoch}", f"Best Valid ACC : {best_valid_acc:.2f}, Best Train ACC with Valid : {best_train_acc_with_val:.2f}")
     ### 학습 종료 후 ###
     # best model 불러오기.
     model.load_state_dict( torch.load(os.path.join(base_path,'checkpoint','{}_best.pth'.format(model_name))) )

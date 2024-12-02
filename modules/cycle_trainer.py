@@ -129,6 +129,107 @@ def train_cycle(args, model, num_classes, num_regions, head_n,
     return total_train_loss, np.mean(train_acc_list), np.mean(train_mae_list), total_mse_loss
 
 
+def train_noisylabel(args, model, num_classes, num_regions, head_n,
+           ema_mode, teacher, momentum_schedule, coef_schedule, it,
+          EPOCHS, epoch, train_dataloader, optimizer, classify_criterion, DEVICE):
+    """
+    Joint learning of teacher and student with sample selection based on confidence.
+    """
+    model.train()
+    teacher.train()  # Teacher is now trainable
+    MSE = torch.nn.MSELoss()
+
+    # Coefficient for loss balancing
+    coff = coef_schedule[it]
+
+    train_correct = [0] * num_regions
+    train_mae = [0] * num_regions
+
+    total_train_loss = 0
+    total_student_loss = 0
+    total_teacher_loss = 0
+
+    for idx, (sample1, sample2, label, label_float, filename, file_index) in enumerate(train_dataloader):
+        sample1, sample2, label, label_float = sample1.to(DEVICE), sample2.to(DEVICE), label.to(DEVICE), label_float.to(DEVICE)
+        optimizer.zero_grad()
+
+        # Predictions and features for student and teacher
+        pred_s, feat_s = model(sample2, head_n=head_n, projection=True)
+        pred_t, feat_t = teacher(sample1, head_n=head_n, projection=True)
+
+        k = 16  # Number of top-k samples to select
+        loss_student = 0
+        loss_teacher = 0
+
+        for i in range(num_regions):
+            pos_probs_s = pred_s[:, i, :]  # Student's predictions for the i-th region
+            pos_probs_t = pred_t[:, i, :]  # Teacher's predictions for the i-th region
+            pos_feat_s = feat_s[:, i, :]   # Student's features for the i-th region
+            pos_feat_t = feat_t[:, i, :]   # Teacher's features for the i-th region
+
+            # Confidence-based Sample Selection for Student
+            confidence_scores_t, _ = pos_probs_t.max(dim=-1)  # Max probability as confidence score
+            topk_indices = torch.topk(confidence_scores_t, k=min(k, sample1.size(0))).indices  # Select top-k samples
+
+            # Filtered samples for student
+            filtered_samples_s = pos_probs_s[topk_indices]
+            filtered_targets = label[:, i][topk_indices]
+            filtered_feat_s = pos_feat_s[topk_indices]
+            filtered_feat_t = pos_feat_t[topk_indices]
+
+            # Student Loss: Classification + Consistency
+            loss_s_classifier = classify_criterion(filtered_samples_s, filtered_targets)
+            loss_const_s = MSE(filtered_feat_s, filtered_feat_t)
+            loss_student +=  loss_s_classifier 
+
+            # Teacher Loss: Classification Only (on all samples)
+            loss_t_classifier = classify_criterion(pos_probs_t, label[:, i])
+            loss_const_t = MSE(pos_feat_s, pos_feat_t)  # Optional, add consistency loss for teacher
+            loss_teacher += loss_t_classifier
+
+            # Update metrics for the region
+            prediction = pos_probs_s.max(1, keepdim=True)[1]
+            train_correct[i] += prediction.eq(label[:, i].view_as(prediction)).sum().item()
+            train_mae[i] += torch.abs(prediction - label[:, i].view_as(prediction)).sum().item()
+
+        # Normalize losses by number of regions
+        loss_student /= num_regions
+        loss_teacher /= num_regions
+
+        # Combine both losses
+        total_loss = loss_student + loss_teacher
+        total_loss.backward()
+        optimizer.step()
+
+        # Record losses
+        total_train_loss += total_loss.item()
+        total_student_loss += loss_student.item()
+        total_teacher_loss += loss_teacher.item()
+
+    # Finalize Metrics
+    total_train_loss /= len(train_dataloader)
+    total_student_loss /= len(train_dataloader)
+    total_teacher_loss /= len(train_dataloader)
+
+    train_acc_list = [100.0 * train_correct[i] / len(train_dataloader.dataset) for i in range(num_regions)]
+    train_mae_list = [train_mae[i] / len(train_dataloader.dataset) for i in range(num_regions)]
+
+    # Logging
+    for i in range(num_regions):
+        print(f"EPOCH {epoch} / {EPOCHS}, Position {i} Train ACC : {train_acc_list[i]:.2f}")
+        print(f"EPOCH {epoch} / {EPOCHS}, Position {i} Train MAE : {train_mae_list[i]:.2f}")
+
+    print(f"EPOCH {epoch} / {EPOCHS}, Mean Train ACC : {np.mean(train_acc_list):.2f}")
+    print(f"EPOCH {epoch} / {EPOCHS}, Mean Train MAE : {np.mean(train_mae_list):.2f}")
+    print(f"EPOCH {epoch} / {EPOCHS}, Total Loss : {total_train_loss:.2f}")
+    print(f"EPOCH {epoch} / {EPOCHS}, Student Loss : {total_student_loss:.2f}")
+    print(f"EPOCH {epoch} / {EPOCHS}, Teacher Loss : {total_teacher_loss:.2f}")
+
+    return total_train_loss, np.mean(train_acc_list), np.mean(train_mae_list), total_student_loss
+
+
+
+
 
 def evaluate(args, model, num_classes, num_regions, head_n, EPOCHS, epoch, valid_dataloader, optimizer, classify_criterion, DEVICE):
     #여기에 num_classes_list, num_regions_list, n_head도
